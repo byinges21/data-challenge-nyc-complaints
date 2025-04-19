@@ -1,0 +1,226 @@
+---
+title: "Dashboard 2"
+output: html_document
+name: "Betty, Kyle, Roman"
+date: "2025-03-15"
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(shiny)
+library(ggplot2)
+library(httr)
+library(jsonlite)
+library(leaflet)
+library(shinydashboard)
+library(lubridate)
+```
+```{r}
+# API Call
+odata_url <- "https://data.cityofnewyork.us/api/odata/v4/erm2-nwe9"
+response <- GET(odata_url)
+
+# Check if API call was successful
+if (http_status(response)$category != "Success") {
+  stop("Error: Failed to retrieve data from API.")
+}
+
+# Read data and convert to a dataframe
+content_text <- content(response, "text", encoding = "UTF-8")
+data <- fromJSON(content_text)$value
+
+# Check if data is empty
+if (is.null(data) || nrow(data) == 0) {
+  stop("Error: Retrieved data is empty.")
+}
+
+# Clean Data
+data_clean <- data %>%
+  mutate(
+    created_date = as.POSIXct(created_date, format = "%Y-%m-%dT%H:%M:%S", tz = "UTC"),
+    hour_of_day = hour(created_date),
+    year = year(created_date),
+    complaint_type = as.factor(complaint_type),
+    borough = as.factor(borough),
+    agency = as.factor(agency),
+    day_of_week = weekdays(created_date),
+    month = months(created_date),
+    descriptor = as.factor(descriptor),
+    latitude = as.numeric(latitude),
+    longitude = as.numeric(longitude)
+  ) %>%
+  filter(!is.na(latitude) & !is.na(longitude))
+
+# Check if data_clean is valid
+if (nrow(data_clean) == 0) {
+  stop("Error: No valid data after cleaning.")
+}
+```
+
+
+```{r}
+ui <- dashboardPage(
+  dashboardHeader(title = "NYC 311 Complaints Dashboard"),
+  
+  dashboardSidebar(
+    sidebarMenu(
+      menuItem("Complaint Analysis", tabName = "complaint_analysis", icon = icon("chart-bar")),
+      menuItem("Yearly Trends", tabName = "yearly_trends", icon = icon("line-chart")),
+      menuItem("Car Accidents", tabName = "car_accidents", icon = icon("car")),
+      menuItem("Geographical Map", tabName = "map", icon = icon("map"))
+    )
+  ),
+  
+  dashboardBody(
+    tabItems(
+      # Tab 1: Complaint Analysis
+      tabItem(
+        tabName = "complaint_analysis",
+        fluidRow(
+          box(
+            title = "Filters",
+            width = 4,
+            solidHeader = TRUE,
+            status = "primary",
+            selectInput("complaint_type", "Complaint Type", choices = c("All", unique(data_clean$complaint_type)), selected = "All", multiple = TRUE),
+            selectInput("borough", "Borough", choices = c("All", unique(data_clean$borough)), selected = "All", multiple = TRUE),
+            selectInput("agency", "Agency", choices = c("All", unique(data_clean$agency)), selected = "All", multiple = TRUE),
+            sliderInput("hour_of_day", "Hour of Day", min = 0, max = 23, value = c(0, 23), step = 1),
+            selectInput("day_of_week", "Day of Week", choices = c("All", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"), selected = "All", multiple = TRUE),
+            selectInput("month", "Month", choices = c("All", month.name), selected = "All", multiple = TRUE)
+          ),
+          
+          box(
+            title = "Complaint Distribution",
+            width = 8,
+            solidHeader = TRUE,
+            status = "primary",
+            plotOutput("complaint_plot")
+          )
+        ),
+        fluidRow(
+          box(
+            title = "Complaint Summary Table",
+            width = 12,
+            solidHeader = TRUE,
+            status = "primary",
+            tableOutput("complaint_table")
+          )
+        )
+      ),
+      
+      # Tab 2: Yearly Trends
+      tabItem(
+        tabName = "yearly_trends",
+        fluidRow(
+          box(
+            title = "Top Complaint Trends Over the Years",
+            width = 12,
+            solidHeader = TRUE,
+            status = "primary",
+            plotOutput("yearly_trend_plot")
+          )
+        )
+      ),
+      
+      # Tab 3: Car Accidents
+      tabItem(
+        tabName = "car_accidents",
+        fluidRow(
+          box(
+            title = "Car-Related Complaints Over the Years",
+            width = 12,
+            solidHeader = TRUE,
+            status = "primary",
+            plotOutput("car_accident_trend_plot")
+          )
+        )
+      ),
+      
+      # Tab 4: Geographical Map
+      tabItem(
+        tabName = "map",
+        fluidRow(
+          box(
+            title = "Complaint Locations",
+            width = 12,
+            solidHeader = TRUE,
+            status = "primary",
+            leafletOutput("complaint_map", height = 500)
+          )
+        )
+      )
+    )
+  )
+)
+
+
+```
+
+
+```{r}
+server <- function(input, output) {
+  
+  # Reactive Data Filter
+  filtered_data <- reactive({
+    df <- data_clean
+    
+    if (!("All" %in% input$complaint_type)) {
+      df <- df %>% filter(complaint_type %in% input$complaint_type)
+    }
+    
+    if (!("All" %in% input$borough)) {
+      df <- df %>% filter(borough %in% input$borough)
+    }
+    
+    df %>%
+      filter(hour_of_day >= input$hour_of_day[1] & hour_of_day <= input$hour_of_day[2])
+  })
+  
+  # Complaint Distribution Plot
+  output$complaint_plot <- renderPlot({
+    ggplot(filtered_data(), aes(x = complaint_type, fill = borough)) +
+      geom_bar(stat = "count") +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+      labs(title = "Complaint Type Distribution", x = "Complaint Type", y = "Count")
+  })
+  
+  # Complaint Table
+  output$complaint_table <- renderTable({
+    filtered_data() %>%
+      group_by(complaint_type, borough) %>%
+      summarise(complaints = n(), .groups = "drop") %>%
+      arrange(desc(complaints))
+  })
+  
+  # Car Accidents Trend
+  car_accident_data <- reactive({
+    filtered_data() %>%
+      filter(str_detect(complaint_type, regex("vehicle|parking|driveway", ignore_case = TRUE))) %>%
+      group_by(year, complaint_type) %>%
+      summarise(count = n(), .groups = "drop")
+  })
+  
+  output$car_accident_trend_plot <- renderPlot({
+    ggplot(car_accident_data(), aes(x = year, y = count, color = complaint_type, group = complaint_type)) +
+      geom_line(size = 1) +
+      geom_point(size = 3) +
+      labs(title = "Car-Related Complaints Over the Years",
+           x = "Year", y = "Count", color = "Complaint Type") +
+      theme_minimal()
+  })
+  
+  # Map
+  output$complaint_map <- renderLeaflet({
+    leaflet(filtered_data()) %>%
+      addTiles() %>%
+      addCircleMarkers(~longitude, ~latitude, color = "red", radius = 3)
+  })
+}
+
+shinyApp(ui = ui, server = server)
+
+```
+
